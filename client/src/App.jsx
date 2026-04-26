@@ -198,6 +198,63 @@ function LogPanel({ entries, logRef }) {
   );
 }
 
+// ─── Connection log panel ────────────────────────────────────────────────────
+
+function ConnectionLog({ entries, show, onToggle }) {
+  const colors = { success:"var(--success)", error:"var(--danger)", warn:"var(--warn)", info:"var(--text-muted)" };
+  const icons  = { success:"✓", error:"✗", warn:"⚠", info:"·" };
+  const errorCount = entries.filter(e => e.type === "error").length;
+  const warnCount  = entries.filter(e => e.type === "warn").length;
+
+  return (
+    <div style={{ marginTop:8 }}>
+      <button onClick={onToggle} style={{
+        display:"flex", alignItems:"center", gap:8, fontSize:13,
+        padding:"6px 12px", width:"100%", justifyContent:"space-between",
+        background: show ? "var(--surface2)" : "var(--surface)",
+        borderRadius: show ? "var(--radius-sm) var(--radius-sm) 0 0" : "var(--radius-sm)",
+      }}>
+        <span style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:11, fontFamily:"var(--mono)", background:"var(--surface2)",
+            border:"1px solid var(--border)", borderRadius:4, padding:"1px 6px" }}>
+            {entries.length} log entries
+          </span>
+          {errorCount > 0 && <span style={{ fontSize:11, background:"var(--danger-bg)",
+            color:"var(--danger)", border:"1px solid #fcc", borderRadius:4, padding:"1px 6px" }}>
+            {errorCount} error{errorCount > 1 ? "s" : ""}
+          </span>}
+          {warnCount > 0 && <span style={{ fontSize:11, background:"var(--warn-bg)",
+            color:"var(--warn)", border:"1px solid #fde68a", borderRadius:4, padding:"1px 6px" }}>
+            {warnCount} warning{warnCount > 1 ? "s" : ""}
+          </span>}
+        </span>
+        <span style={{ color:"var(--text-muted)", fontSize:12 }}>{show ? "▲ hide log" : "▼ show connection log"}</span>
+      </button>
+
+      {show && (
+        <div style={{ fontFamily:"var(--mono)", fontSize:12, lineHeight:1.8,
+          background:"#1a1a18", color:"#e8e6e0", borderRadius:"0 0 var(--radius-sm) var(--radius-sm)",
+          padding:"0.75rem 1rem", maxHeight:280, overflowY:"auto",
+          border:"1px solid var(--border)", borderTop:"none" }}>
+          {entries.length === 0
+            ? <span style={{ color:"#666" }}>No log entries yet.</span>
+            : entries.map((e, i) => {
+                const c = { success:"#4ade80", error:"#f87171", warn:"#fbbf24", info:"#94a3b8" }[e.type] || "#94a3b8";
+                return (
+                  <div key={i} style={{ display:"flex", gap:10 }}>
+                    <span style={{ color:"#555", flexShrink:0 }}>{e.time}</span>
+                    <span style={{ color:c, flexShrink:0 }}>{icons[e.type]||"·"}</span>
+                    <span style={{ color:c }}>{e.msg}</span>
+                  </div>
+                );
+              })
+          }
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -226,6 +283,8 @@ export default function App() {
   const [progress, setProgress] = useState({ done:0, total:0, label:"" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [connLog, setConnLog] = useState([]);
+  const [showConnLog, setShowConnLog] = useState(false);
   const [results, setResults] = useState({ customers:0, invoices:0, vendors:0, staff:0, payroll:0, bills:0 });
   const logRef = useRef(null);
 
@@ -246,10 +305,18 @@ export default function App() {
         setPreview(generateMockData());
       } else {
         const data = await apiFetch("/api/square/fetch", { token: squareToken, sandbox: squareSandbox });
+        if (data.log) setConnLog(prev => [...prev, ...data.log]);
         setPreview({ customers: data.customers||[], invoices: data.invoices||[], vendors: data.vendors||[], staff: data.staff||[], payroll: data.payroll||[], bills: data.bills||[] });
       }
       setStep(1);
-    } catch(e) { setError(e.message); }
+    } catch(e) {
+      setError(e.message);
+      // Try to extract log from error response body if available
+      try {
+        const parsed = JSON.parse(e.message);
+        if (parsed?.log) { setConnLog(prev => [...prev, ...parsed.log]); setShowConnLog(true); }
+      } catch(_) {}
+    }
     setLoading(false);
   }
 
@@ -262,6 +329,7 @@ export default function App() {
         setOdooUID(1);
       } else {
         const data = await apiFetch("/api/odoo/auth", { url:odooUrl, db:odooDB, username:odooUser, password:odooPass });
+        if (data.log) { setConnLog(prev => [...prev, ...data.log]); setShowConnLog(true); }
         setOdooUID(data.uid);
       }
       setStep(3);
@@ -493,7 +561,16 @@ export default function App() {
 
         {error && <Alert type="error">{error}</Alert>}
 
-        <div style={{ display:"flex", justifyContent:"flex-end" }}>
+        {!useMock && (
+          <div>
+            <ConnectionLog entries={connLog} show={showConnLog} onToggle={()=>setShowConnLog(p=>!p)} />
+          </div>
+        )}
+
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          {connLog.length > 0
+            ? <button onClick={()=>{ setConnLog([]); setShowConnLog(false); }} style={{ fontSize:12, color:"var(--text-muted)" }}>Clear log</button>
+            : <div />}
           <button className="primary" onClick={handleFetchSquare}
             disabled={loading || (!useMock && !squareToken)}>
             {loading ? "Fetching..." : "Fetch Square data →"}
@@ -775,12 +852,23 @@ export default function App() {
 
         {error && <Alert type="error">{error}</Alert>}
 
-        <div style={{ display:"flex", justifyContent:"space-between" }}>
+        {!useMock && (
+          <div>
+            <ConnectionLog entries={connLog} show={showConnLog} onToggle={()=>setShowConnLog(p=>!p)} />
+          </div>
+        )}
+
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <button onClick={()=>setStep(1)}>← Back</button>
-          <button className="primary" onClick={handleOdooAuth}
-            disabled={loading || (!useMock && (!odooUrl||!odooDB||!odooUser||!odooPass))}>
-            {loading ? "Connecting to Odoo..." : "Connect to Odoo →"}
-          </button>
+          <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+            {connLog.length > 0 && (
+              <button onClick={()=>{ setConnLog([]); setShowConnLog(false); }} style={{ fontSize:12, color:"var(--text-muted)" }}>Clear log</button>
+            )}
+            <button className="primary" onClick={handleOdooAuth}
+              disabled={loading || (!useMock && (!odooUrl||!odooDB||!odooUser||!odooPass))}>
+              {loading ? "Connecting to Odoo..." : "Connect to Odoo →"}
+            </button>
+          </div>
         </div>
       </div>
     );
