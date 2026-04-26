@@ -50,26 +50,56 @@ app.post("/api/square/fetch", async (req, res) => {
   }
 
   try {
-    const [customers, invoicesRaw] = await Promise.all([
+    // Fetch customers and locations in parallel first
+    const [customers, locationsRes] = await Promise.all([
       fetchAllPages(`${base}/customers?limit=100`, "customers"),
-      fetchAllPages(`${base}/invoices?limit=100`, "invoices"),
+      fetch(`${base}/locations`, { headers }),
     ]);
 
-    // Build a customer lookup map for invoice names
+    // Build customer lookup map
     const custMap = {};
     customers.forEach(c => {
       custMap[c.id] = `${c.given_name || ""} ${c.family_name || ""}`.trim();
     });
 
+    // Extract location IDs — invoices endpoint requires location_id
+    let invoicesRaw = [];
+    if (locationsRes.ok) {
+      const locData = await locationsRes.json();
+      const locationIds = (locData.locations || []).map(l => l.id).filter(Boolean);
+
+      // Fetch invoices for each location and merge
+      const invoicesByLocation = await Promise.all(
+        locationIds.map(locId =>
+          fetchAllPages(`${base}/invoices?limit=100&location_id=${locId}`, "invoices").catch(() => [])
+        )
+      );
+
+      // Flatten and deduplicate by invoice id
+      const seen = new Set();
+      for (const batch of invoicesByLocation) {
+        for (const inv of batch) {
+          if (!seen.has(inv.id)) {
+            seen.add(inv.id);
+            invoicesRaw.push(inv);
+          }
+        }
+      }
+    }
+
     const invoices = invoicesRaw.map(inv => ({
       ...inv,
-      customer_name: custMap[inv.primary_recipient?.customer_id] || inv.primary_recipient?.customer_id || "",
+      customer_name:
+        custMap[inv.primary_recipient?.customer_id] ||
+        inv.primary_recipient?.email_address ||
+        inv.primary_recipient?.customer_id ||
+        "Unknown",
     }));
 
     res.json({
       customers,
       invoices,
-      vendors: [], // Square doesn't have a vendor concept — users add these manually
+      vendors: [],
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
