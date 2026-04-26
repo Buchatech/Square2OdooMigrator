@@ -31,33 +31,43 @@ app.post("/api/square/fetch", async (req, res) => {
     "Content-Type": "application/json",
   };
 
+  // Paginate through all pages of a Square list endpoint
+  async function fetchAllPages(url, resultKey) {
+    let allItems = [];
+    let cursor = null;
+    do {
+      const pageUrl = cursor ? `${url}&cursor=${encodeURIComponent(cursor)}` : url;
+      const response = await fetch(pageUrl, { headers });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.errors?.[0]?.detail || `Square API error: ${response.status}`);
+      }
+      const data = await response.json();
+      allItems = allItems.concat(data[resultKey] || []);
+      cursor = data.cursor || null;
+    } while (cursor);
+    return allItems;
+  }
+
   try {
-    const [custRes, invRes] = await Promise.all([
-      fetch(`${base}/customers?limit=200`, { headers }),
-      fetch(`${base}/invoices?limit=200`, { headers }),
+    const [customers, invoicesRaw] = await Promise.all([
+      fetchAllPages(`${base}/customers?limit=100`, "customers"),
+      fetchAllPages(`${base}/invoices?limit=100`, "invoices"),
     ]);
-
-    if (!custRes.ok) {
-      const err = await custRes.json();
-      return res.status(custRes.status).json({ error: err.errors?.[0]?.detail || "Square customers error" });
-    }
-
-    const custData = await custRes.json();
-    const invData = invRes.ok ? await invRes.json() : { invoices: [] };
 
     // Build a customer lookup map for invoice names
     const custMap = {};
-    (custData.customers || []).forEach(c => {
+    customers.forEach(c => {
       custMap[c.id] = `${c.given_name || ""} ${c.family_name || ""}`.trim();
     });
 
-    const invoices = (invData.invoices || []).map(inv => ({
+    const invoices = invoicesRaw.map(inv => ({
       ...inv,
       customer_name: custMap[inv.primary_recipient?.customer_id] || inv.primary_recipient?.customer_id || "",
     }));
 
     res.json({
-      customers: custData.customers || [],
+      customers,
       invoices,
       vendors: [], // Square doesn't have a vendor concept — users add these manually
     });
