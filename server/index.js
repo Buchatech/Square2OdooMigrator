@@ -49,40 +49,95 @@ app.post("/api/square/fetch", async (req, res) => {
     return allItems;
   }
 
+  // Safely fetch an endpoint — returns [] instead of throwing so one
+  // failed endpoint never blocks the rest of the migration data
+  async function safeFetch(url, resultKey) {
+    try { return await fetchAllPages(url, resultKey); }
+    catch (e) { console.warn(`safeFetch failed for ${url}:`, e.message); return []; }
+  }
+
+  // POST-based paginated search (used by vendors/orders endpoints)
+  async function fetchAllPost(url, body, resultKey) {
+    let allItems = [];
+    let cursor = null;
+    do {
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(cursor ? { ...body, cursor } : body),
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.errors?.[0]?.detail || `Square POST error: ${response.status}`);
+      }
+      const data = await response.json();
+      allItems = allItems.concat(data[resultKey] || []);
+      cursor = data.cursor || null;
+    } while (cursor);
+    return allItems;
+  }
+
   try {
-    // Fetch customers and locations in parallel first
+    // ── Round 1: fetch locations + customers in parallel ──────────────────
     const [customers, locationsRes] = await Promise.all([
       fetchAllPages(`${base}/customers?limit=100`, "customers"),
       fetch(`${base}/locations`, { headers }),
     ]);
 
-    // Build customer lookup map
     const custMap = {};
     customers.forEach(c => {
       custMap[c.id] = `${c.given_name || ""} ${c.family_name || ""}`.trim();
     });
 
-    // Extract location IDs — invoices endpoint requires location_id
-    let invoicesRaw = [];
-    if (locationsRes.ok) {
-      const locData = await locationsRes.json();
-      const locationIds = (locData.locations || []).map(l => l.id).filter(Boolean);
+    const locData = locationsRes.ok ? await locationsRes.json() : { locations: [] };
+    const locationIds = (locData.locations || []).map(l => l.id).filter(Boolean);
 
-      // Fetch invoices for each location and merge
-      const invoicesByLocation = await Promise.all(
+    // ── Round 2: fetch everything else in parallel ─────────────────────────
+    const [
+      invoicesByLocation,
+      vendorResult,
+      teamMembers,
+      payrollEmployees,
+      bills,
+    ] = await Promise.all([
+
+      // Invoices — per location
+      Promise.all(
         locationIds.map(locId =>
-          fetchAllPages(`${base}/invoices?limit=100&location_id=${locId}`, "invoices").catch(() => [])
+          safeFetch(`${base}/invoices?limit=100&location_id=${locId}`, "invoices")
         )
-      );
+      ),
 
-      // Flatten and deduplicate by invoice id
-      const seen = new Set();
-      for (const batch of invoicesByLocation) {
-        for (const inv of batch) {
-          if (!seen.has(inv.id)) {
-            seen.add(inv.id);
-            invoicesRaw.push(inv);
-          }
+      // Vendors — Square uses /vendors endpoint (POST search)
+      fetch(`${base}/vendors/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ filter: { status: ["ACTIVE", "INACTIVE"] } }),
+      }).then(r => r.ok ? r.json() : { vendors: [] }).catch(() => ({ vendors: [] })),
+
+      // Team members (staff)
+      fetchAllPost(`${base}/team-members/search`, { limit: 100 }, "team_members")
+        .catch(() => []),
+
+      // Payroll employees (requires Payroll permission on token)
+      safeFetch(`${base}/labor/employees?limit=100`, "employees"),
+
+      // Vendor bills / purchase orders — search orders with PURCHASE type
+      fetchAllPost(
+        `${base}/orders/search`,
+        { location_ids: locationIds, limit: 100, query: { filter: { source_filter: { source_names: ["SQUARE_BILLS"] } } } },
+        "orders"
+      ).catch(() => []),
+    ]);
+
+    // ── Deduplicate invoices ───────────────────────────────────────────────
+    const seen = new Set();
+    const invoicesRaw = [];
+    for (const batch of invoicesByLocation) {
+      for (const inv of batch) {
+        if (!seen.has(inv.id)) {
+          seen.add(inv.id);
+          invoicesRaw.push(inv);
         }
       }
     }
@@ -96,10 +151,48 @@ app.post("/api/square/fetch", async (req, res) => {
         "Unknown",
     }));
 
+    // ── Normalize vendors ─────────────────────────────────────────────────
+    const vendors = (vendorResult.vendors || []).map(v => ({
+      id: v.id,
+      name: v.name || "",
+      email: v.contacts?.[0]?.email_address || "",
+      phone: v.contacts?.[0]?.phone_number || "",
+      address: v.address || {},
+      account_number: v.account_number || "",
+      note: v.note || "",
+      status: v.status || "ACTIVE",
+      type: "vendor",
+    }));
+
+    // ── Normalize team members ────────────────────────────────────────────
+    const staff = teamMembers.map(m => ({
+      id: m.id,
+      given_name: m.given_name || "",
+      family_name: m.family_name || "",
+      email_address: m.email_address || "",
+      phone_number: m.phone_number || "",
+      status: m.status || "ACTIVE",
+      job_title: m.assigned_locations?.assignment_type || "",
+      is_owner: m.is_owner || false,
+    }));
+
+    // ── Normalize payroll employees ───────────────────────────────────────
+    const payroll = payrollEmployees.map(e => ({
+      id: e.id,
+      given_name: e.first_name || "",
+      family_name: e.last_name || "",
+      email_address: e.email || "",
+      phone_number: e.phone_number || "",
+      status: e.status || "ACTIVE",
+    }));
+
     res.json({
       customers,
       invoices,
-      vendors: [],
+      vendors,
+      staff,
+      payroll,
+      bills,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
