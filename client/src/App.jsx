@@ -41,12 +41,25 @@ function generateMockData() {
     line_items: [{ name:["Consulting","Design","Dev Work","Support","Marketing"][i], quantity:"1", total_money:{ amount:(5000+i*1337)*10, currency:"USD" } }],
   }));
   const vendors = [
-    { id:"VEN_001", name:"Acme Supplies Co.", email:"orders@acmesupplies.com", phone:"+1 (800) 555-0100", type:"vendor" },
-    { id:"VEN_002", name:"Metro Office Products", email:"billing@metroofficepro.com", phone:"+1 (800) 555-0101", type:"vendor" },
-    { id:"CON_001", name:"Jane Freelance Developer", email:"jane@janedev.io", phone:"+1 (612) 555-0200", type:"contractor" },
-    { id:"CON_002", name:"Mark Graphic Design", email:"mark@markdesigns.com", phone:"+1 (612) 555-0201", type:"contractor" },
+    { id:"VEN_001", name:"Acme Supplies Co.", email:"orders@acmesupplies.com", phone:"+1 (800) 555-0100", type:"vendor", status:"ACTIVE" },
+    { id:"VEN_002", name:"Metro Office Products", email:"billing@metroofficepro.com", phone:"+1 (800) 555-0101", type:"vendor", status:"ACTIVE" },
+    { id:"CON_001", name:"Jane Freelance Developer", email:"jane@janedev.io", phone:"+1 (612) 555-0200", type:"contractor", status:"ACTIVE" },
+    { id:"CON_002", name:"Mark Graphic Design", email:"mark@markdesigns.com", phone:"+1 (612) 555-0201", type:"contractor", status:"ACTIVE" },
   ];
-  return { customers, invoices, vendors };
+  const staff = [
+    { id:"STF_001", given_name:"Rachel", family_name:"Torres", email_address:"rachel@mycompany.com", phone_number:"+1 (612) 555-0301", status:"ACTIVE", job_title:"Manager", is_owner:true },
+    { id:"STF_002", given_name:"James", family_name:"Park", email_address:"james@mycompany.com", phone_number:"+1 (612) 555-0302", status:"ACTIVE", job_title:"Associate", is_owner:false },
+    { id:"STF_003", given_name:"Priya", family_name:"Nair", email_address:"priya@mycompany.com", phone_number:"+1 (612) 555-0303", status:"INACTIVE", job_title:"Associate", is_owner:false },
+  ];
+  const payroll = [
+    { id:"PAY_001", given_name:"Rachel", family_name:"Torres", email_address:"rachel@mycompany.com", status:"ACTIVE" },
+    { id:"PAY_002", given_name:"James", family_name:"Park", email_address:"james@mycompany.com", status:"ACTIVE" },
+  ];
+  const bills = [
+    { id:"BILL_001", vendor_name:"Acme Supplies Co.", total_money:{ amount:125000, currency:"USD" }, created_at:"2024-01-10T10:00:00Z", state:"COMPLETED" },
+    { id:"BILL_002", vendor_name:"Metro Office Products", total_money:{ amount:43500, currency:"USD" }, created_at:"2024-02-14T10:00:00Z", state:"OPEN" },
+  ];
+  return { customers, invoices, vendors, staff, payroll, bills };
 }
 
 // ─── Odoo transformers ────────────────────────────────────────────────────────
@@ -200,12 +213,12 @@ export default function App() {
   const [odooPass, setOdooPass] = useState("");
   const [odooUID, setOdooUID]   = useState(null);
   // Data
-  const [preview, setPreview] = useState({ customers:[], invoices:[], vendors:[] });
+  const [preview, setPreview] = useState({ customers:[], invoices:[], vendors:[], staff:[], payroll:[], bills:[] });
   // Manual vendors
   const [manualVendors, setManualVendors] = useState([]);
   const [newVendor, setNewVendor] = useState({ name:"", email:"", phone:"", type:"vendor" });
   // Selection
-  const [sel, setSel] = useState({ customers:true, invoices:true, vendors:true, companyInfo:true });
+  const [sel, setSel] = useState({ customers:true, invoices:true, vendors:true, staff:true, payroll:true, bills:true, companyInfo:true });
   // Company info
   const [company, setCompany] = useState({ name:"", email:"", phone:"", street:"", city:"", zip:"", country:"US", vat:"" });
   // Migration
@@ -213,7 +226,7 @@ export default function App() {
   const [progress, setProgress] = useState({ done:0, total:0, label:"" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [results, setResults] = useState({ customers:0, invoices:0, vendors:0 });
+  const [results, setResults] = useState({ customers:0, invoices:0, vendors:0, staff:0, payroll:0, bills:0 });
   const logRef = useRef(null);
 
   const addLog = useCallback((msg, type="info") => {
@@ -233,7 +246,7 @@ export default function App() {
         setPreview(generateMockData());
       } else {
         const data = await apiFetch("/api/square/fetch", { token: squareToken, sandbox: squareSandbox });
-        setPreview({ customers: data.customers||[], invoices: data.invoices||[], vendors: [] });
+        setPreview({ customers: data.customers||[], invoices: data.invoices||[], vendors: data.vendors||[], staff: data.staff||[], payroll: data.payroll||[], bills: data.bills||[] });
       }
       setStep(1);
     } catch(e) { setError(e.message); }
@@ -272,10 +285,13 @@ export default function App() {
       (sel.companyInfo && company.name ? 1 : 0) +
       (sel.customers ? preview.customers.length : 0) +
       (sel.vendors ? allVendors.length : 0) +
-      (sel.invoices ? preview.invoices.length : 0);
+      (sel.invoices ? preview.invoices.length : 0) +
+      (sel.staff ? preview.staff.length : 0) +
+      (sel.payroll ? preview.payroll.length : 0) +
+      (sel.bills ? preview.bills.length : 0);
 
     setProgress({ done:0, total, label:"Starting..." });
-    const res = { customers:0, invoices:0, vendors:0 };
+    const res = { customers:0, invoices:0, vendors:0, staff:0, payroll:0, bills:0 };
     let done = 0;
 
     const tick = (label) => { done++; setProgress({ done, total, label }); };
@@ -352,6 +368,86 @@ export default function App() {
         addLog(`${res.invoices} invoices migrated`, "success");
       }
 
+      // Staff / team members → Odoo HR employees
+      if (sel.staff && preview.staff.length > 0) {
+        addLog(`Migrating ${preview.staff.length} team members...`);
+        for (const m of preview.staff) {
+          try {
+            if (!useMock) {
+              await odooCall("hr.employee", "create", [{
+                name: [m.given_name, m.family_name].filter(Boolean).join(" ") || "Unknown",
+                work_email: m.email_address || "",
+                work_phone: m.phone_number || "",
+                job_title: m.job_title || "",
+                active: m.status === "ACTIVE",
+              }]);
+            } else { await sleep(70); }
+            res.staff++;
+            tick(`Staff: ${m.given_name} ${m.family_name}`);
+          } catch(e) {
+            addLog(`Staff ${m.given_name} ${m.family_name} failed: ${e.message}`, "warn");
+            tick(`Staff failed`);
+          }
+        }
+        addLog(`${res.staff} team members migrated`, "success");
+      }
+
+      // Payroll employees → Odoo HR employees (deduplicated against staff)
+      if (sel.payroll && preview.payroll.length > 0) {
+        addLog(`Migrating ${preview.payroll.length} payroll employees...`);
+        for (const e of preview.payroll) {
+          try {
+            if (!useMock) {
+              const existing = await odooCall("hr.employee", "search_read",
+                [[["work_email","=",e.email_address]]], { fields:["id"], limit:1 });
+              if (!existing.length) {
+                await odooCall("hr.employee", "create", [{
+                  name: [e.given_name, e.family_name].filter(Boolean).join(" ") || "Unknown",
+                  work_email: e.email_address || "",
+                  active: e.status === "ACTIVE",
+                }]);
+              }
+            } else { await sleep(70); }
+            res.payroll++;
+            tick(`Payroll: ${e.given_name} ${e.family_name}`);
+          } catch(err) {
+            addLog(`Payroll ${e.given_name} ${e.family_name} failed: ${err.message}`, "warn");
+            tick(`Payroll failed`);
+          }
+        }
+        addLog(`${res.payroll} payroll employees migrated`, "success");
+      }
+
+      // Bills → Odoo vendor bills (account.move purchase)
+      if (sel.bills && preview.bills.length > 0) {
+        addLog(`Migrating ${preview.bills.length} bills...`);
+        for (const b of preview.bills) {
+          try {
+            if (!useMock) {
+              const partners = await odooCall("res.partner", "search_read",
+                [[["name","ilike",b.vendor_name||""]]], { fields:["id"], limit:1 });
+              await odooCall("account.move", "create", [{
+                move_type: "in_invoice",
+                partner_id: partners[0]?.id || false,
+                invoice_date: b.created_at?.split("T")[0],
+                ref: b.id,
+                invoice_line_ids: [[0, 0, {
+                  name: b.vendor_name || "Bill",
+                  quantity: 1,
+                  price_unit: (b.total_money?.amount || 0) / 100,
+                }]],
+              }]);
+            } else { await sleep(90); }
+            res.bills++;
+            tick(`Bill: ${b.vendor_name || b.id}`);
+          } catch(err) {
+            addLog(`Bill ${b.id} failed: ${err.message}`, "warn");
+            tick(`Bill failed`);
+          }
+        }
+        addLog(`${res.bills} bills migrated`, "success");
+      }
+
       addLog("Migration complete!", "success");
       setResults(res);
       setStep(4);
@@ -408,7 +504,7 @@ export default function App() {
   }
 
   function Step1() {
-    const { customers, invoices, vendors } = preview;
+    const { customers, invoices, vendors, staff, payroll, bills } = preview;
     const pct = (n,d) => d>0 ? `${Math.round(n/d*100)}%` : "—";
     const paid = invoices.filter(i=>i.status==="PAID").length;
     const totalAmt = invoices.reduce((s,i)=>s+(i.payment_requests?.[0]?.total_money?.amount||0),0);
@@ -419,7 +515,10 @@ export default function App() {
           {[
             ["Customers", customers.length, "var(--accent)"],
             ["Invoices", invoices.length, "var(--success)"],
-            ["Vendors / Contractors", vendors.length + manualVendors.length, "var(--warn)"],
+            ["Vendors", vendors.length + manualVendors.length, "var(--warn)"],
+            ["Staff / Team", staff.length, "#7c3aed"],
+            ["Payroll", payroll.length, "#0d9488"],
+            ["Bills", bills.length, "#dc2626"],
           ].map(([label, count, color]) => (
             <Card key={label} style={{ textAlign:"center" }}>
               <div style={{ fontSize:32, fontWeight:600, color }}>{count}</div>
@@ -479,11 +578,95 @@ export default function App() {
           </Card>
         )}
 
+        {/* Vendors from Square */}
+        {vendors.length > 0 && (
+          <Card>
+            <SectionTitle>Vendors ({vendors.length})</SectionTitle>
+            <div style={{ overflowX:"auto" }}>
+              <table>
+                <thead><tr>{["Name","Email","Phone","Status"].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                <tbody>{vendors.slice(0,5).map(v=>(
+                  <tr key={v.id}>
+                    <td style={{ fontWeight:500 }}>{v.name}</td>
+                    <td style={{ color:"var(--text-muted)" }}>{v.email}</td>
+                    <td style={{ color:"var(--text-muted)" }}>{v.phone}</td>
+                    <td><Badge color={v.status==="ACTIVE"?"green":"gray"}>{v.status}</Badge></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+              {vendors.length > 5 && <p style={{ fontSize:12, color:"var(--text-muted)", padding:"6px 12px" }}>+{vendors.length-5} more vendors</p>}
+            </div>
+          </Card>
+        )}
+
+        {/* Staff / team members */}
+        {staff.length > 0 && (
+          <Card>
+            <SectionTitle>Staff & Team Members ({staff.length})</SectionTitle>
+            <div style={{ overflowX:"auto" }}>
+              <table>
+                <thead><tr>{["Name","Email","Phone","Role","Status"].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                <tbody>{staff.slice(0,5).map(m=>(
+                  <tr key={m.id}>
+                    <td style={{ fontWeight:500 }}>{m.given_name} {m.family_name} {m.is_owner ? <Badge color="blue">Owner</Badge> : ""}</td>
+                    <td style={{ color:"var(--text-muted)" }}>{m.email_address}</td>
+                    <td style={{ color:"var(--text-muted)" }}>{m.phone_number}</td>
+                    <td>{m.job_title}</td>
+                    <td><Badge color={m.status==="ACTIVE"?"green":"gray"}>{m.status}</Badge></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+              {staff.length > 5 && <p style={{ fontSize:12, color:"var(--text-muted)", padding:"6px 12px" }}>+{staff.length-5} more team members</p>}
+            </div>
+          </Card>
+        )}
+
+        {/* Payroll */}
+        {payroll.length > 0 && (
+          <Card>
+            <SectionTitle>Payroll Employees ({payroll.length})</SectionTitle>
+            <div style={{ overflowX:"auto" }}>
+              <table>
+                <thead><tr>{["Name","Email","Status"].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                <tbody>{payroll.slice(0,5).map(e=>(
+                  <tr key={e.id}>
+                    <td style={{ fontWeight:500 }}>{e.given_name} {e.family_name}</td>
+                    <td style={{ color:"var(--text-muted)" }}>{e.email_address}</td>
+                    <td><Badge color={e.status==="ACTIVE"?"green":"gray"}>{e.status}</Badge></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+              {payroll.length > 5 && <p style={{ fontSize:12, color:"var(--text-muted)", padding:"6px 12px" }}>+{payroll.length-5} more employees</p>}
+            </div>
+          </Card>
+        )}
+
+        {/* Bills */}
+        {bills.length > 0 && (
+          <Card>
+            <SectionTitle>Bills ({bills.length})</SectionTitle>
+            <div style={{ overflowX:"auto" }}>
+              <table>
+                <thead><tr>{["Vendor","Amount","Date","Status"].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                <tbody>{bills.slice(0,5).map(b=>(
+                  <tr key={b.id}>
+                    <td style={{ fontWeight:500 }}>{b.vendor_name||b.id}</td>
+                    <td>${((b.total_money?.amount||0)/100).toLocaleString()}</td>
+                    <td style={{ color:"var(--text-muted)" }}>{b.created_at?.split("T")[0]}</td>
+                    <td><Badge color={b.state==="COMPLETED"?"green":b.state==="OPEN"?"amber":"gray"}>{b.state}</Badge></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+              {bills.length > 5 && <p style={{ fontSize:12, color:"var(--text-muted)", padding:"6px 12px" }}>+{bills.length-5} more bills</p>}
+            </div>
+          </Card>
+        )}
+
         {/* Manual vendors section */}
         <Card>
           <SectionTitle>Vendors & Contractors</SectionTitle>
           <p style={{ fontSize:13, color:"var(--text-muted)", marginBottom:12 }}>
-            Square doesn't store vendor/contractor records. Add them manually here and they'll be created in Odoo.
+            Add any additional vendors or contractors not already listed above.
           </p>
           {manualVendors.length > 0 && (
             <div style={{ overflowX:"auto", marginBottom:14 }}>
@@ -538,9 +721,12 @@ export default function App() {
         <Card>
           <SectionTitle>What to migrate</SectionTitle>
           {[
-            ["customers", `Customers (${preview.customers.length})`, "Created as contacts with Customer rank in Odoo (res.partner)"],
-            ["invoices",  `Invoices (${preview.invoices.length})`, "Created as customer invoices in Odoo Accounting (account.move)"],
-            ["vendors",   `Vendors & Contractors (${[...preview.vendors,...manualVendors].length})`, "Created as contacts with Supplier rank in Odoo (res.partner)"],
+            ["customers",  `Customers (${preview.customers.length})`, "Created as contacts with Customer rank in Odoo (res.partner)"],
+            ["invoices",   `Invoices (${preview.invoices.length})`, "Created as customer invoices in Odoo Accounting (account.move)"],
+            ["vendors",    `Vendors & Contractors (${[...preview.vendors,...manualVendors].length})`, "Created as contacts with Supplier rank in Odoo (res.partner)"],
+            ["staff",      `Staff & Team Members (${preview.staff.length})`, "Created as employees in Odoo HR (hr.employee)"],
+            ["payroll",    `Payroll Employees (${preview.payroll.length})`, "Created as HR employees, skips duplicates already added from staff (hr.employee)"],
+            ["bills",      `Bills (${preview.bills.length})`, "Created as vendor bills in Odoo Accounting (account.move, type: in_invoice)"],
             ["companyInfo","My company info", "Updates your company record in Odoo Settings (res.company)"],
           ].map(([key,label,desc])=>(
             <label key={key} style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"10px 0",
@@ -614,7 +800,10 @@ export default function App() {
             <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
               {sel.customers   && <Badge color="blue">{preview.customers.length} customers</Badge>}
               {sel.invoices    && <Badge color="green">{preview.invoices.length} invoices</Badge>}
-              {sel.vendors     && allVendors.length > 0 && <Badge color="amber">{allVendors.length} vendors/contractors</Badge>}
+              {sel.vendors     && allVendors.length > 0 && <Badge color="amber">{allVendors.length} vendors</Badge>}
+              {sel.staff       && preview.staff.length > 0 && <Badge color="teal">{preview.staff.length} staff</Badge>}
+              {sel.payroll     && preview.payroll.length > 0 && <Badge color="teal">{preview.payroll.length} payroll</Badge>}
+              {sel.bills       && preview.bills.length > 0 && <Badge color="red">{preview.bills.length} bills</Badge>}
               {sel.companyInfo && company.name && <Badge color="gray">company info</Badge>}
             </div>
             {useMock && <Alert type="info" style={{ marginTop:12 }}>Demo mode — no real data will be written to Odoo.</Alert>}
@@ -661,8 +850,15 @@ export default function App() {
           <h2 style={{ fontSize:22, fontWeight:600, marginBottom:6 }}>Migration complete</h2>
           <p style={{ color:"var(--text-muted)", fontSize:14 }}>Your Square data has been successfully imported into Odoo.</p>
         </div>
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, width:"100%", maxWidth:420 }}>
-          {[["Customers",results.customers,"var(--accent)"],["Invoices",results.invoices,"var(--success)"],["Vendors",results.vendors,"var(--warn)"]].map(([l,n,c])=>(
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, width:"100%", maxWidth:520 }}>
+          {[
+            ["Customers",results.customers,"var(--accent)"],
+            ["Invoices",results.invoices,"var(--success)"],
+            ["Vendors",results.vendors,"var(--warn)"],
+            ["Staff",results.staff,"#7c3aed"],
+            ["Payroll",results.payroll,"#0d9488"],
+            ["Bills",results.bills,"#dc2626"],
+          ].map(([l,n,c])=>(
             <Card key={l} style={{ textAlign:"center" }}>
               <div style={{ fontSize:28, fontWeight:600, color:c }}>{n}</div>
               <div style={{ fontSize:12, color:"var(--text-muted)", marginTop:2 }}>{l}</div>
