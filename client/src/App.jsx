@@ -2,6 +2,8 @@ import { useState, useRef, useCallback } from "react";
 
 // ─── API helpers (call our own backend proxy) ────────────────────────────────
 
+// Always resolves with { ok, status, data } — never throws on HTTP errors
+// so callers can extract log entries before handling the error
 async function apiFetch(path, body) {
   const res = await fetch(path, {
     method: "POST",
@@ -9,8 +11,7 @@ async function apiFetch(path, body) {
     body: JSON.stringify(body),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
+  return { ok: res.ok, status: res.status, data };
 }
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
@@ -200,7 +201,8 @@ function LogPanel({ entries, logRef }) {
 
 // ─── Connection log panel ────────────────────────────────────────────────────
 
-function ConnectionLog({ entries, show, onToggle }) {
+function ConnectionLog({ entries, show, onToggle, onClear, onRefresh }) {
+  const logEndRef = useRef(null);
   const colors = { success:"var(--success)", error:"var(--danger)", warn:"var(--warn)", info:"var(--text-muted)" };
   const icons  = { success:"✓", error:"✗", warn:"⚠", info:"·" };
   const errorCount = entries.filter(e => e.type === "error").length;
@@ -208,16 +210,20 @@ function ConnectionLog({ entries, show, onToggle }) {
 
   return (
     <div style={{ marginTop:8 }}>
-      <button onClick={onToggle} style={{
-        display:"flex", alignItems:"center", gap:8, fontSize:13,
-        padding:"6px 12px", width:"100%", justifyContent:"space-between",
-        background: show ? "var(--surface2)" : "var(--surface)",
+      <div style={{
+        display:"flex", alignItems:"center", gap:0,
+        background:"var(--surface2)", border:"1px solid var(--border)",
         borderRadius: show ? "var(--radius-sm) var(--radius-sm) 0 0" : "var(--radius-sm)",
       }}>
-        <span style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <span style={{ fontSize:11, fontFamily:"var(--mono)", background:"var(--surface2)",
-            border:"1px solid var(--border)", borderRadius:4, padding:"1px 6px" }}>
-            {entries.length} log entries
+        {/* Toggle button — takes up most of the bar */}
+        <button onClick={onToggle} style={{
+          flex:1, display:"flex", alignItems:"center", gap:8, fontSize:13,
+          padding:"7px 12px", background:"transparent", border:"none",
+          borderRadius:"inherit", justifyContent:"flex-start", cursor:"pointer",
+        }}>
+          <span style={{ fontSize:11, fontFamily:"var(--mono)", background:"var(--surface)",
+            border:"1px solid var(--border-strong)", borderRadius:4, padding:"1px 6px", color:"var(--text-muted)" }}>
+            {entries.length} entries
           </span>
           {errorCount > 0 && <span style={{ fontSize:11, background:"var(--danger-bg)",
             color:"var(--danger)", border:"1px solid #fcc", borderRadius:4, padding:"1px 6px" }}>
@@ -227,17 +233,35 @@ function ConnectionLog({ entries, show, onToggle }) {
             color:"var(--warn)", border:"1px solid #fde68a", borderRadius:4, padding:"1px 6px" }}>
             {warnCount} warning{warnCount > 1 ? "s" : ""}
           </span>}
-        </span>
-        <span style={{ color:"var(--text-muted)", fontSize:12 }}>{show ? "▲ hide log" : "▼ show connection log"}</span>
-      </button>
+          <span style={{ color:"var(--text-muted)", fontSize:12, marginLeft:"auto" }}>{show ? "▲ hide" : "▼ connection log"}</span>
+        </button>
+
+        {/* Refresh button */}
+        <button onClick={onRefresh} title="Re-run connection attempt to refresh log"
+          style={{ padding:"7px 11px", background:"transparent", border:"none",
+            borderLeft:"1px solid var(--border)", fontSize:13, cursor:"pointer",
+            color:"var(--text-muted)", flexShrink:0 }}>
+          ↺
+        </button>
+
+        {/* Clear button */}
+        {entries.length > 0 && (
+          <button onClick={onClear} title="Clear log"
+            style={{ padding:"7px 11px", background:"transparent", border:"none",
+              borderLeft:"1px solid var(--border)", fontSize:13, cursor:"pointer",
+              color:"var(--text-muted)", flexShrink:0, borderRadius:"0 var(--radius-sm) var(--radius-sm) 0" }}>
+            ✕
+          </button>
+        )}
+      </div>
 
       {show && (
         <div style={{ fontFamily:"var(--mono)", fontSize:12, lineHeight:1.8,
           background:"#1a1a18", color:"#e8e6e0", borderRadius:"0 0 var(--radius-sm) var(--radius-sm)",
-          padding:"0.75rem 1rem", maxHeight:280, overflowY:"auto",
+          padding:"0.75rem 1rem", maxHeight:300, overflowY:"auto",
           border:"1px solid var(--border)", borderTop:"none" }}>
           {entries.length === 0
-            ? <span style={{ color:"#666" }}>No log entries yet.</span>
+            ? <span style={{ color:"#555" }}>No log entries yet — click ↺ to retry the connection.</span>
             : entries.map((e, i) => {
                 const c = { success:"#4ade80", error:"#f87171", warn:"#fbbf24", info:"#94a3b8" }[e.type] || "#94a3b8";
                 return (
@@ -249,6 +273,7 @@ function ConnectionLog({ entries, show, onToggle }) {
                 );
               })
           }
+          <div ref={logEndRef} />
         </div>
       )}
     </div>
@@ -304,18 +329,25 @@ export default function App() {
         await sleep(600);
         setPreview(generateMockData());
       } else {
-        const data = await apiFetch("/api/square/fetch", { token: squareToken, sandbox: squareSandbox });
-        if (data.log) setConnLog(prev => [...prev, ...data.log]);
+        const { ok, data } = await apiFetch("/api/square/fetch", { token: squareToken, sandbox: squareSandbox });
+        // Always capture log first
+        if (data?.log?.length) {
+          setConnLog(prev => [...prev, ...data.log]);
+          setShowConnLog(true);
+        }
+        if (!ok) {
+          setError(data?.error || "Square fetch failed — check the connection log for details");
+          setLoading(false);
+          return;
+        }
         setPreview({ customers: data.customers||[], invoices: data.invoices||[], vendors: data.vendors||[], staff: data.staff||[], payroll: data.payroll||[], bills: data.bills||[] });
+        setStep(1);
       }
-      setStep(1);
     } catch(e) {
-      setError(e.message);
-      // Try to extract log from error response body if available
-      try {
-        const parsed = JSON.parse(e.message);
-        if (parsed?.log) { setConnLog(prev => [...prev, ...parsed.log]); setShowConnLog(true); }
-      } catch(_) {}
+      const time = new Date().toISOString().split("T")[1].slice(0, 12);
+      setConnLog(prev => [...prev, { time, msg: `Network error: ${e.message}`, type: "error" }]);
+      setShowConnLog(true);
+      setError(`Could not reach server: ${e.message}`);
     }
     setLoading(false);
   }
@@ -327,13 +359,30 @@ export default function App() {
       if (useMock) {
         await sleep(400);
         setOdooUID(1);
+        setStep(3);
       } else {
-        const data = await apiFetch("/api/odoo/auth", { url:odooUrl, db:odooDB, username:odooUser, password:odooPass });
-        if (data.log) { setConnLog(prev => [...prev, ...data.log]); setShowConnLog(true); }
+        // apiFetch never throws — always returns { ok, status, data }
+        const { ok, data } = await apiFetch("/api/odoo/auth", { url:odooUrl, db:odooDB, username:odooUser, password:odooPass });
+        // Always capture log entries first, before checking ok
+        if (data?.log?.length) {
+          setConnLog(prev => [...prev, ...data.log]);
+          setShowConnLog(true);
+        }
+        if (!ok || !data.uid) {
+          setError(data?.error || "Odoo authentication failed — check the connection log for details");
+          setLoading(false);
+          return;
+        }
         setOdooUID(data.uid);
+        setStep(3);
       }
-      setStep(3);
-    } catch(e) { setError(e.message); }
+    } catch(e) {
+      // Only network-level failures reach here (server completely unreachable)
+      const time = new Date().toISOString().split("T")[1].slice(0, 12);
+      setConnLog(prev => [...prev, { time, msg: `Network error: ${e.message}`, type: "error" }]);
+      setShowConnLog(true);
+      setError(`Could not reach server: ${e.message}`);
+    }
     setLoading(false);
   }
 
@@ -563,14 +612,17 @@ export default function App() {
 
         {!useMock && (
           <div>
-            <ConnectionLog entries={connLog} show={showConnLog} onToggle={()=>setShowConnLog(p=>!p)} />
+            <ConnectionLog
+              entries={connLog}
+              show={showConnLog}
+              onToggle={()=>setShowConnLog(p=>!p)}
+              onClear={()=>{ setConnLog([]); setShowConnLog(false); }}
+              onRefresh={handleFetchSquare}
+            />
           </div>
         )}
 
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-          {connLog.length > 0
-            ? <button onClick={()=>{ setConnLog([]); setShowConnLog(false); }} style={{ fontSize:12, color:"var(--text-muted)" }}>Clear log</button>
-            : <div />}
+        <div style={{ display:"flex", justifyContent:"flex-end" }}>
           <button className="primary" onClick={handleFetchSquare}
             disabled={loading || (!useMock && !squareToken)}>
             {loading ? "Fetching..." : "Fetch Square data →"}
@@ -853,22 +905,21 @@ export default function App() {
         {error && <Alert type="error">{error}</Alert>}
 
         {!useMock && (
-          <div>
-            <ConnectionLog entries={connLog} show={showConnLog} onToggle={()=>setShowConnLog(p=>!p)} />
-          </div>
+          <ConnectionLog
+            entries={connLog}
+            show={showConnLog}
+            onToggle={()=>setShowConnLog(p=>!p)}
+            onClear={()=>{ setConnLog([]); setShowConnLog(false); }}
+            onRefresh={handleOdooAuth}
+          />
         )}
 
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <button onClick={()=>setStep(1)}>← Back</button>
-          <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-            {connLog.length > 0 && (
-              <button onClick={()=>{ setConnLog([]); setShowConnLog(false); }} style={{ fontSize:12, color:"var(--text-muted)" }}>Clear log</button>
-            )}
-            <button className="primary" onClick={handleOdooAuth}
-              disabled={loading || (!useMock && (!odooUrl||!odooDB||!odooUser||!odooPass))}>
-              {loading ? "Connecting to Odoo..." : "Connect to Odoo →"}
-            </button>
-          </div>
+          <button className="primary" onClick={handleOdooAuth}
+            disabled={loading || (!useMock && (!odooUrl||!odooDB||!odooUser||!odooPass))}>
+            {loading ? "Connecting to Odoo..." : "Connect to Odoo →"}
+          </button>
         </div>
       </div>
     );
