@@ -294,6 +294,7 @@ export default function App() {
   const [odooUser, setOdooUser] = useState("");
   const [odooPass, setOdooPass] = useState("");
   const [odooUID, setOdooUID]   = useState(null);
+  const [odooSession, setOdooSession] = useState(null);
   // Data
   const [preview, setPreview] = useState({ customers:[], invoices:[], vendors:[], staff:[], payroll:[], bills:[] });
   // Manual vendors
@@ -374,6 +375,7 @@ export default function App() {
           return;
         }
         setOdooUID(data.uid);
+        setOdooSession(data.sessionCookie || null);
         setStep(3);
       }
     } catch(e) {
@@ -387,10 +389,12 @@ export default function App() {
   }
 
   async function odooCall(model, method, args, kwargs={}) {
-    const data = await apiFetch("/api/odoo/call", {
+    const { ok, data } = await apiFetch("/api/odoo/call", {
       url:odooUrl, db:odooDB, uid:odooUID, password:odooPass,
+      sessionCookie: odooSession,
       model, method, args, kwargs,
     });
+    if (!ok) throw new Error(data?.error || "Odoo call failed");
     return data.result;
   }
 

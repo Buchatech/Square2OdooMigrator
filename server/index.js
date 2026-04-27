@@ -17,8 +17,6 @@ const limiter = rateLimit({ windowMs: 60 * 1000, max: 120 });
 app.use("/api/", limiter);
 
 // ─── Connection log helper ────────────────────────────────────────────────────
-// Each request builds its own log array and returns it with the response
-// so the frontend can display it in the connection log panel.
 function makeLogger() {
   const entries = [];
   const log = (msg, type = "info") => {
@@ -117,7 +115,7 @@ app.post("/api/square/fetch", async (req, res) => {
   }
 
   try {
-    // Round 1: locations + customers
+    // Round 1: customers + locations
     log("Fetching customers...");
     const [customers, locationsRes] = await Promise.all([
       fetchAllPages(`${base}/customers?limit=100`, "customers"),
@@ -137,7 +135,9 @@ app.post("/api/square/fetch", async (req, res) => {
     log(`  ✓ locations: ${locationIds.length} found`, "success");
 
     // Round 2: everything else in parallel
-    const [invoicesByLocation, vendorRes, teamMembers, payrollEmployees, bills] = await Promise.all([
+    const [invoicesByLocation, vendorRes, teamMembers, payrollEmployees, billsRaw] = await Promise.all([
+
+      // Invoices per location
       Promise.all(
         locationIds.map(async (locId, i) => {
           log(`Fetching invoices for location ${i + 1} of ${locationIds.length}...`);
@@ -149,6 +149,8 @@ app.post("/api/square/fetch", async (req, res) => {
           return invs;
         })
       ),
+
+      // Vendors
       fetch(`${base}/vendors/search`, {
         method: "POST", headers,
         body: JSON.stringify({ filter: { status: ["ACTIVE", "INACTIVE"] } }),
@@ -159,12 +161,39 @@ app.post("/api/square/fetch", async (req, res) => {
         log(`  ✓ vendors: ${(d.vendors || []).length} records`, "success");
         return d;
       }).catch(e => { log(`  ✗ vendors failed: ${e.message}`, "warn"); return { vendors: [] }; }),
+
+      // Team members
       safePost("team members", `${base}/team-members/search`, { limit: 100 }, "team_members"),
+
+      // Payroll employees
       safeFetch("payroll employees", `${base}/labor/employees?limit=100`, "employees"),
-      safePost("bills", `${base}/orders/search`, {
-        location_ids: locationIds, limit: 100,
-        query: { filter: { source_filter: { source_names: ["SQUARE_BILLS"] } } },
-      }, "orders"),
+
+      // Bills — Square Bills uses dedicated /bills endpoint, NOT orders
+      // The /orders SQUARE_BILLS filter returns purchase orders, not AP bills
+      (async () => {
+        log("Fetching bills...");
+        try {
+          // Try the dedicated bills endpoint first (Square Bills product)
+          const r = await fetch(`${base}/bills?limit=100`, { headers });
+          if (r.ok) {
+            const d = await r.json();
+            const bills = d.bills || [];
+            log(`  ✓ bills: ${bills.length} records`, "success");
+            return bills;
+          }
+          // Fallback: search orders with PURCHASE source
+          log(`  Bills endpoint returned ${r.status}, trying orders fallback...`, "warn");
+          const fallback = await fetchAllPost(`${base}/orders/search`, {
+            location_ids: locationIds, limit: 100,
+            query: { filter: { source_filter: { source_names: ["SQUARE_BILLS"] } } },
+          }, "orders").catch(() => []);
+          log(`  ✓ bills (via orders fallback): ${fallback.length} records`, "success");
+          return fallback;
+        } catch (e) {
+          log(`  ✗ bills failed: ${e.message}`, "warn");
+          return [];
+        }
+      })(),
     ]);
 
     // Deduplicate invoices
@@ -184,6 +213,7 @@ app.post("/api/square/fetch", async (req, res) => {
         inv.primary_recipient?.customer_id || "Unknown",
     }));
 
+    // Normalize vendors
     const vendors = (vendorRes.vendors || []).map(v => ({
       id: v.id, name: v.name || "",
       email: v.contacts?.[0]?.email_address || "",
@@ -192,6 +222,7 @@ app.post("/api/square/fetch", async (req, res) => {
       note: v.note || "", status: v.status || "ACTIVE", type: "vendor",
     }));
 
+    // Normalize staff
     const staff = teamMembers.map(m => ({
       id: m.id, given_name: m.given_name || "", family_name: m.family_name || "",
       email_address: m.email_address || "", phone_number: m.phone_number || "",
@@ -199,10 +230,23 @@ app.post("/api/square/fetch", async (req, res) => {
       is_owner: m.is_owner || false,
     }));
 
+    // Normalize payroll
     const payroll = payrollEmployees.map(e => ({
       id: e.id, given_name: e.first_name || "", family_name: e.last_name || "",
       email_address: e.email || "", phone_number: e.phone_number || "",
       status: e.status || "ACTIVE",
+    }));
+
+    // Normalize bills — handle both dedicated bills format and orders fallback
+    const bills = billsRaw.map(b => ({
+      id: b.id,
+      vendor_id: b.vendor_id || "",
+      vendor_name: b.vendor?.name || b.vendor_name || vendors.find(v => v.id === b.vendor_id)?.name || "Unknown Vendor",
+      total_money: b.total_money || b.net_amount_due_money || { amount: 0, currency: "USD" },
+      created_at: b.created_at || b.due_date || "",
+      due_date: b.due_date || "",
+      status: b.status || b.state || "UNKNOWN",
+      invoice_number: b.invoice_number || b.id,
     }));
 
     log(`Square fetch complete — customers: ${customers.length}, invoices: ${invoices.length}, vendors: ${vendors.length}, staff: ${staff.length}, payroll: ${payroll.length}, bills: ${bills.length}`, "success");
@@ -214,7 +258,7 @@ app.post("/api/square/fetch", async (req, res) => {
   }
 });
 
-// ─── Odoo auth proxy ──────────────────────────────────────────────────────────
+// ─── Odoo auth ────────────────────────────────────────────────────────────────
 app.post("/api/odoo/auth", async (req, res) => {
   const { url, db, username, password } = req.body;
   const { log, entries } = makeLogger();
@@ -240,6 +284,18 @@ app.post("/api/odoo/auth", async (req, res) => {
 
     log(`HTTP response status: ${response.status} ${response.statusText}`);
 
+    // Capture session cookie from Odoo's Set-Cookie header so subsequent
+    // calls can be authenticated — this is the fix for silent write failures
+    const setCookie = response.headers.get("set-cookie");
+    let sessionCookie = null;
+    if (setCookie) {
+      const match = setCookie.match(/session_id=([^;]+)/);
+      if (match) {
+        sessionCookie = `session_id=${match[1]}`;
+        log(`Session cookie captured`, "success");
+      }
+    }
+
     const data = await response.json();
     log(`Response received — jsonrpc: ${data.jsonrpc || "?"}`);
 
@@ -257,7 +313,7 @@ app.post("/api/odoo/auth", async (req, res) => {
     }
 
     if (!data.result.uid) {
-      log(`Result present but uid is missing or falsy: uid=${data.result.uid}`, "error");
+      log(`Result present but uid is missing: uid=${data.result.uid}`, "error");
       log(`Result keys: ${Object.keys(data.result).join(", ")}`, "error");
       if (data.result.db === false) log("Database name not found on server", "error");
       return res.status(401).json({
@@ -267,7 +323,12 @@ app.post("/api/odoo/auth", async (req, res) => {
     }
 
     log(`✓ Authenticated as "${data.result.name}" (uid: ${data.result.uid})`, "success");
-    res.json({ uid: data.result.uid, name: data.result.name, log: entries });
+    res.json({
+      uid: data.result.uid,
+      name: data.result.name,
+      sessionCookie,  // returned to client, passed back on every odoo/call
+      log: entries,
+    });
   } catch (e) {
     log(`Network or parse error: ${e.message}`, "error");
     if (e.code) log(`Error code: ${e.code}`, "error");
@@ -277,14 +338,19 @@ app.post("/api/odoo/auth", async (req, res) => {
 
 // ─── Odoo call proxy ──────────────────────────────────────────────────────────
 app.post("/api/odoo/call", async (req, res) => {
-  const { url, db, uid, password, model, method, args, kwargs } = req.body;
+  const { url, model, method, args, kwargs, sessionCookie } = req.body;
   if (!url || !model || !method)
     return res.status(400).json({ error: "Missing required fields" });
+
+  const callHeaders = { "Content-Type": "application/json" };
+  // Use session cookie for authentication on every call — this is what
+  // was missing before, causing all writes to silently fail
+  if (sessionCookie) callHeaders["Cookie"] = sessionCookie;
 
   try {
     const response = await fetch(`${url.replace(/\/$/, "")}/web/dataset/call_kw`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: callHeaders,
       body: JSON.stringify({
         jsonrpc: "2.0", method: "call",
         params: {
